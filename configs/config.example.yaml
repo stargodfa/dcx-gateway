@@ -1,0 +1,89 @@
+app:
+  name: dcx-gateway
+  env: dev
+  port: "8080"
+
+server:
+  max_body_bytes: 8388608
+
+# Copy this template to config.dev.yaml and set your own local credentials.
+mysql:
+  dsn: "dcx-gateway:replace-with-your-db-password@tcp(127.0.0.1:3306)/dcx-gateway?charset=utf8mb4&parseTime=True&loc=Local"
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+  key_prefix: "dcx-gateway:" # Applied to every cache and Session key; use a unique prefix per project.
+
+fastapi:
+  base_url: "http://127.0.0.1:8000"
+  ws_data_url: "" # Optional: ws://127.0.0.1:8000/ws_data
+  push_video_streams: false
+  ws_connect_timeout_seconds: 5
+  ws_ping_interval_seconds: 20
+  ws_reconnect_min_seconds: 1
+  ws_reconnect_max_seconds: 30
+  ws_auth:
+    type: none
+    header_name: ""
+    token: ""
+
+adapters:
+  security:
+    mode: mock
+    base_url: ""
+    timeout_seconds: 3
+    access_summary_path: "/api/security/access-summary"
+    fire_alerts_path: "/api/security/fire-alerts"
+    auth:
+      type: none
+      header_name: ""
+      token: ""
+  energy:
+    mode: mock
+    base_url: ""
+    timeout_seconds: 3
+    snapshot_path: "/api/energy/snapshot"
+    auth:
+      type: none
+      header_name: ""
+      token: ""
+  education:
+    mode: mock
+    base_url: ""
+    timeout_seconds: 3
+    classroom_usage_path: "/api/education/classroom-usage"
+    auth:
+      type: none
+      header_name: ""
+      token: ""
+
+security:
+  enabled: true
+  protect_read: false
+  static_token_enabled: false # Set a private random token before enabling.
+  static_token: ""
+  session_ttl_seconds: 7200
+
+scheduler:
+  preload:
+    enabled: true
+    interval_seconds: 60
+    push_ws: false
+    scripts:
+      - security_main
+      - energy_main
+      - education_main
+
+mock_push:
+  enabled: false
+  interval_seconds: 5
+  scripts:
+    - security_main
+    - energy_main
+    - education_main
+
+# Deprecated compatibility only. New deployments should use security.session_ttl_seconds.
+auth:
+  token_ttl_minutes: 120

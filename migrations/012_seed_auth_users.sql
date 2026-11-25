@@ -1,0 +1,4 @@
+-- Public releases do not create login accounts or distribute password hashes.
+-- This migration number is retained for compatibility; it intentionally has no DML.
+-- Create your own ue_users entry with a locally generated bcrypt password hash,
+-- or configure a private security.static_token for local demonstrations.

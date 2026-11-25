@@ -1,0 +1,2662 @@
+openapi: 3.0.3
+info:
+  title: dcx-gateway API
+  version: "1.0.0"
+  description: |
+    UE config APIs return the JSON body directly without code/data wrapping.
+    scene_desired is a generated read view and has no write API.
+    X-Request-Id is echoed in responses. If absent, X-Trace-Id is used; if both are absent, the gateway generates one.
+    X-Request-Id and X-Trace-Id are truncated to 128 characters before being logged or echoed.
+servers:
+  - url: http://localhost:8080
+    description: local
+  - url: https://dcx-gateway.example.com
+    description: lan
+
+security: []
+
+tags:
+  - name: auth
+  - name: health
+  - name: runtime
+  - name: scripts
+  - name: ue-config-read
+  - name: ue-config-init
+  - name: ue-config-model-types
+  - name: ue-config-model-table
+  - name: ue-config-model-config
+  - name: ue-config-scene
+  - name: ue-config-aux
+
+paths:
+  /api/health:
+    get:
+      tags: [health]
+      summary: Health check
+      parameters:
+        - name: deep
+          in: query
+          description: When true, checks MySQL ping, Redis ping, and whether fastapi.ws_data_url is configured. Raw dependency errors are logged server-side and are not returned in the HTTP response.
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, example: ok}
+        "503":
+          description: degraded when MySQL or Redis check fails
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, example: degraded}
+                  checks:
+                    type: object
+                    properties:
+                      mysql:
+                        $ref: "#/components/schemas/HealthDependencyCheck"
+                      redis:
+                        $ref: "#/components/schemas/HealthDependencyCheck"
+                      fastapi_ws:
+                        $ref: "#/components/schemas/HealthDependencyCheck"
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: Login and create Redis-backed session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "403":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          description: Authentication dependency failed; diagnostic details are logged server-side.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: {type: string, example: auth_failed}
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: Logout current Bearer token
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      responses:
+        "200":
+          description: Logout response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogoutResponse"
+        "401":
+          $ref: "#/components/responses/JSONError"
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      summary: Get current authenticated user
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthUser"
+        "401":
+          $ref: "#/components/responses/JSONError"
+
+  /api/runtime/ws-data/status:
+    get:
+      tags: [runtime]
+      summary: Get FastAPI /ws_data push status
+      description: |
+        Returns best-effort WebSocket push status and counters. The response never includes auth headers, tokens, or message payloads.
+        This GET follows the existing security.protect_read rule: readable without token when protect_read=false, authenticated when protect_read=true.
+      responses:
+        "200":
+          description: Runtime WS status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WSDataStatus"
+        "401":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/runtime/warmup-options:
+    get:
+      tags: [runtime]
+      summary: List UE report scene warmup resource options
+      description: |
+        Returns editable resource options for UE report scene warmup. data_scripts are Gateway DataBundle scripts.
+        warmup.data uses data_script_id, warmup.charts uses chart binding_id, and warmup.videos uses video_id.
+        The instances list is for report scene bindings[].instance_id.
+        This GET follows the existing security.protect_read rule.
+      responses:
+        "200":
+          description: Warmup resource options
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WarmupOptions"
+        "401":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/runtime/report-scenes/preload:
+    post:
+      tags: [runtime]
+      summary: Preload data scripts declared by a UE report scene warmup
+      description: |
+        script_id/chapter_id/scene_id refer to report_scripts, not Gateway DataBundle scripts.
+        The gateway reads full/raw report_scripts, finds the scene, and calls PreloadWithOptions for each warmup.data data_script_id.
+        First version preloads full data scripts; warmup.charts and warmup.videos are returned as requested resources and are not used to filter WS messages.
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportScenePreloadRequest"
+      responses:
+        "200":
+          description: Per data_script preload results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportScenePreloadResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "404":
+          $ref: "#/components/responses/JSONError"
+
+  /api/scripts/{id}/data-bundle:
+    get:
+      tags: [scripts]
+      summary: Get DataBundle
+      parameters:
+        - $ref: "#/components/parameters/ScriptID"
+        - name: use_cache
+          in: query
+          schema: {type: boolean, default: true}
+      responses:
+        "200":
+          $ref: "#/components/responses/DataBundleResponse"
+
+  /api/scripts/{id}/preload:
+    post:
+      tags: [scripts]
+      summary: Preload DataBundle and best-effort push FastAPI /ws_data
+      description: The body may be omitted. A supplied body must contain a single JSON object; force, when present, must be a non-null boolean. Invalid requests do not invoke preload.
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      parameters:
+        - $ref: "#/components/parameters/ScriptID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force: {type: boolean, default: false}
+      responses:
+        "200":
+          $ref: "#/components/responses/PreloadResponse"
+        "400":
+          description: Invalid JSON body or invalid force type.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: string, example: BAD_REQUEST}
+                  message: {type: string, example: body must be a JSON object with an optional boolean force}
+
+  /api/ue/config/index:
+    get:
+      tags: [ue-config-read]
+      summary: List enabled raw config documents
+      responses:
+        "200":
+          $ref: "#/components/responses/ConfigIndexResponse"
+
+  /api/ue/config/raw/{key}:
+    get:
+      tags: [ue-config-read]
+      summary: Read raw JSON document from ue_config_documents
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          $ref: "#/components/responses/RawDocumentResponse"
+        "404":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/bootstrap:
+    get:
+      tags: [ue-config-read]
+      summary: Get bootstrap config bundle for Server hydrate
+      description: |
+        Aggregates raw init/path/chart/drone documents, chart_binding raw if present
+        or generated if the raw document is missing, model_table generated,
+        model_config runtime, and scene_desired generated. Field names are snake_case.
+      responses:
+        "200":
+          description: Bootstrap config body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapConfig"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/init-config:
+    get:
+      tags: [ue-config-init]
+      summary: Get init_config raw JSON
+      responses:
+        "200":
+          $ref: "#/components/responses/InitConfigResponse"
+    put:
+      tags: [ue-config-init]
+      summary: Atomically update non-instance init_config fields
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Only camera/camera_id/position/rotation/auto_load_on_startup are writable. Instance fields must use instance_ids create/delete.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateInitConfigRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/InitConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+
+  /api/ue/config/init-config/instance_ids/create:
+    post:
+      tags: [ue-config-init]
+      summary: Idempotently add init_config.instance_ids
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Adds trimmed unique instance ids without validating scene_desired, ue_scene_desired_models, or ue_model_instances.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceIDsRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/InitConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+
+  /api/ue/config/init-config/instance_ids/delete:
+    delete:
+      tags: [ue-config-init]
+      summary: Idempotently remove init_config.instance_ids
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Uses a JSON request body; some HTTP clients/proxies need explicit DELETE body support.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceIDsRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/InitConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+
+  /api/ue/config/model-types:
+    get:
+      tags: [ue-config-model-types]
+      summary: Get enabled model_id asset records
+      responses:
+        "200":
+          $ref: "#/components/responses/ModelTypesResponse"
+    put:
+      tags: [ue-config-model-types]
+      summary: Partially update existing model types
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelTypesRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ModelTypesResponse"
+        "404":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/model-types/create:
+    post:
+      tags: [ue-config-model-types]
+      summary: Create model types
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Existing identical model_id is idempotent; different content returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelTypesRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ModelTypesResponse"
+        "409":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/model-types/delete:
+    delete:
+      tags: [ue-config-model-types]
+      summary: Soft delete model types
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Uses a JSON request body. Returns 409 when enabled instances still reference the model_id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelTypeIDsRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ModelTypesResponse"
+        "409":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/model-table:
+    get:
+      tags: [ue-config-model-table]
+      summary: Get generated instance catalog
+      description: Default mode is generated from ue_model_instances. mode=legacy/raw/full reads raw ue_config_documents.model_table.
+      parameters:
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [generated, legacy, raw, full]
+      responses:
+        "200":
+          $ref: "#/components/responses/ModelTableResponse"
+
+  /api/ue/config/model-table/entries/create:
+    post:
+      tags: [ue-config-model-table]
+      summary: Create instance catalog entries and default placements
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Existing identical instance_id is idempotent; different content returns 409. This does not add init_config.instance_ids.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelTableEntriesRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ModelTableResponse"
+        "404":
+          $ref: "#/components/responses/JSONError"
+        "409":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/model-table/entries:
+    put:
+      tags: [ue-config-model-table]
+      summary: Partially update instance catalog entries
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: |
+        Updates only fields present in the request: display_name, model_id, sort_order, enabled.
+        Missing fields keep DB values. Missing instance_id returns 404.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelTableEntriesRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ModelTableResponse"
+        "404":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/model-table/entries/delete:
+    delete:
+      tags: [ue-config-model-table]
+      summary: Soft delete instance catalog entries
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Uses a JSON request body. Sets ue_model_instances.enabled=false, does not change init_config, and retained placements are not output while the instance is disabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceIDsRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ModelTableResponse"
+
+  /api/ue/config/model-config:
+    get:
+      tags: [ue-config-model-config]
+      summary: Get model_config
+      description: |
+        mode=structured returns placements without bounds.
+        mode=runtime returns runtime load config with bounds_size = base_bounds_size * abs(scale).
+        mode empty/raw/full/legacy returns the raw model_config document.
+      parameters:
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [structured, runtime, raw, full, legacy]
+      responses:
+        "200":
+          $ref: "#/components/responses/ModelConfigResponse"
+
+  /api/ue/config/model-config/placements:
+    put:
+      tags: [ue-config-model-config]
+      summary: Update one or more placements
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Use transform as the canonical body. Top-level position/rotation/scale are deprecated compatibility fields. Do not mix transform with top-level position/rotation/scale. Forbidden fields such as bounds_size, uri, format, source_path, model_id, and display_name return 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelPlacementsRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/StructuredModelConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+
+  /api/ue/config/model-config/placements/{instance_id}:
+    put:
+      tags: [ue-config-model-config]
+      summary: Update one placement
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Same semantics as batch placement PUT. Server should send visible and transform.
+      parameters:
+        - name: instance_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelPlacementRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/StructuredModelConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+
+  /api/ue/config/model-config/placements/delete:
+    delete:
+      tags: [ue-config-model-config]
+      summary: Delete placement rows
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Uses a JSON request body matching entries/delete. Physically deletes placement rows, ignores missing ids, and returns structured model_config. Enabled instances without a placement use default visible=true, position=0, rotation=0, scale=1.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstanceIDsRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/StructuredModelConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+
+  /api/ue/config/scene-desired:
+    get:
+      tags: [ue-config-scene]
+      summary: Get scene_desired_config
+      description: Default mode=generated joins ue_model_types, ue_model_instances, and ue_model_instance_placements. mode=legacy reads raw ue_config_documents.scene_desired_config.
+      parameters:
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [generated, legacy]
+      responses:
+        "200":
+          $ref: "#/components/responses/SceneDesiredResponse"
+        "404":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/chart-binding:
+    get:
+      tags: [ue-config-read]
+      summary: Get chart_binding config
+      responses:
+        "200":
+          $ref: "#/components/responses/ChartBindingResponse"
+    put:
+      tags: [ue-config-read]
+      summary: Replace chart_binding document
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Whole-document raw JSON replace in ue_config_documents.chart_binding. Does not update data_bindings.
+      requestBody:
+        $ref: "#/components/requestBodies/RawJSONObject"
+      responses:
+        "200":
+          $ref: "#/components/responses/ChartBindingResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/RequestTooLarge"
+
+  /api/ue/config/video-streams:
+    get:
+      tags: [ue-config-read]
+      summary: Get video_streams config
+      responses:
+        "200":
+          $ref: "#/components/responses/VideoStreamsResponse"
+    put:
+      tags: [ue-config-read]
+      summary: Replace video_streams document
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Whole-document raw JSON replace in ue_config_documents.video_streams. Does not update video_sources.
+      requestBody:
+        $ref: "#/components/requestBodies/RawJSONObject"
+      responses:
+        "200":
+          $ref: "#/components/responses/VideoStreamsResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/chart-config:
+    get:
+      tags: [ue-config-read]
+      summary: Get chart_config
+      description: mode=runtime is a Gateway readable snapshot from structured chart_config plus latest Redis/runtime cache. It is not the authoritative Server real-time chart_data write channel; real-time chart push remains Server/FastAPI WebSocket responsibility.
+      responses:
+        "200":
+          $ref: "#/components/responses/ChartConfigResponse"
+    put:
+      tags: [ue-config-read]
+      summary: Replace chart_config document
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Whole-document raw JSON replace in ue_config_documents.chart_config. Does not update ue_chart_configs or runtime cache.
+      requestBody:
+        $ref: "#/components/requestBodies/RawJSONObject"
+      responses:
+        "200":
+          $ref: "#/components/responses/ChartConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/report-scripts:
+    get:
+      tags: [ue-config-read]
+      summary: Get report_scripts config
+      description: |
+        Default/full/raw returns ue_config_documents.report_scripts.content_json.
+        mode=light or mode=generated returns generated light report_scripts from scripts/script_modules/data_bindings/video_sources.
+        Generated light warmup uses the same ID semantics as full/raw report_scripts: data=data_script_id, charts=binding_id, videos=video_id.
+        Generated warmup.charts lists only data_bindings.binding_id values that can be pushed; it does not use chart_id.
+        Layered CRUD rewrites report_scripts using the current Gateway protocol schema; unknown fields that are not defined by the protocol are not preserved.
+      responses:
+        "200":
+          $ref: "#/components/responses/ReportScriptsResponse"
+    put:
+      tags: [ue-config-read]
+      summary: Replace report_scripts document
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Whole-document raw JSON replace in ue_config_documents.report_scripts. Does not update scripts or script_modules.
+      requestBody:
+        $ref: "#/components/requestBodies/RawJSONObject"
+      responses:
+        "200":
+          $ref: "#/components/responses/ReportScriptsResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/report-scripts/scripts/create:
+    post:
+      tags: [ue-config-write]
+      summary: Create report script
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Creates one script in raw/full report_scripts. Existing same script_id with same label is idempotent; different label returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportScriptRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "409": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scripts:
+    put:
+      tags: [ue-config-write]
+      summary: Update or rename report script
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Updates script_id/label only and preserves chapters.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportScriptRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+        "409": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scripts/delete:
+    delete:
+      tags: [ue-config-write]
+      summary: Delete report script
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Deletes a script and all nested chapters/scenes. Missing script_id is still success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportScriptRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/chapters/create:
+    post:
+      tags: [ue-config-write]
+      summary: Create report chapter
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Creates one chapter under a script. The new chapter starts with scenes=[].
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportChapterRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+        "409": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/chapters:
+    put:
+      tags: [ue-config-write]
+      summary: Update or rename report chapter
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Updates chapter_id/label only and preserves scenes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportChapterRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+        "409": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/chapters/delete:
+    delete:
+      tags: [ue-config-write]
+      summary: Delete report chapter
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Deletes one chapter and nested scenes. Missing script/chapter is still success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportChapterRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scenes/create:
+    post:
+      tags: [ue-config-write]
+      summary: Create report scene
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Scene can be created without camera. Missing bindings/warmup default to empty arrays.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportSceneRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+        "409": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scenes:
+    put:
+      tags: [ue-config-write]
+      summary: Update or rename report scene
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Updates scene_id/label only. Requests containing camera, bindings, or warmup return 400; use /scenes/camera, /scenes/bindings/*, or /scenes/warmup.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportSceneRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+        "409": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scenes/delete:
+    delete:
+      tags: [ue-config-write]
+      summary: Delete report scene
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Deletes one scene. Missing script/chapter/scene is still success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportSceneRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scenes/camera:
+    put:
+      tags: [ue-config-write]
+      summary: Replace report scene camera
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Replaces only camera. Scene may have camera=null before this call.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportSceneCameraRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scenes/bindings/create:
+    post:
+      tags: [ue-config-write]
+      summary: Add report scene bindings
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Adds bindings by instance_id. Existing same binding is idempotent; different content returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportBindingsRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+        "409": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scenes/bindings:
+    put:
+      tags: [ue-config-write]
+      summary: Update report scene bindings
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Updates only the supplied instance_id bindings. Other bindings stay unchanged; this is not a full-array replace.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportBindingsRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scenes/bindings/delete:
+    delete:
+      tags: [ue-config-write]
+      summary: Delete report scene bindings
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Deletes bindings by instance_ids. Missing binding ids are ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportBindingsDeleteRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/report-scripts/scenes/warmup:
+    put:
+      tags: [ue-config-write]
+      summary: Replace report scene warmup
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Replaces warmup data/videos/charts. Values are trim/deduplicated; Gateway does not enforce that IDs already exist when saving.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportSceneWarmupRequest"
+      responses:
+        "200": {$ref: "#/components/responses/ReportScriptsResponse"}
+        "400": {$ref: "#/components/responses/JSONError"}
+        "404": {$ref: "#/components/responses/JSONError"}
+
+  /api/ue/config/drone-config:
+    get:
+      tags: [ue-config-read]
+      summary: Get drone_config
+      responses:
+        "200":
+          $ref: "#/components/responses/DroneConfigResponse"
+    put:
+      tags: [ue-config-read]
+      summary: Replace drone_config document
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Whole-document raw JSON replace in ue_config_documents.drone_config.
+      requestBody:
+        $ref: "#/components/requestBodies/RawJSONObject"
+      responses:
+        "200":
+          $ref: "#/components/responses/DroneConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/path-config:
+    get:
+      tags: [ue-config-read]
+      summary: Get path_config
+      responses:
+        "200":
+          $ref: "#/components/responses/PathConfigResponse"
+    put:
+      tags: [ue-config-read]
+      summary: Replace path_config document
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Whole-document raw JSON replace in ue_config_documents.path_config.
+      requestBody:
+        $ref: "#/components/requestBodies/RawJSONObject"
+      responses:
+        "200":
+          $ref: "#/components/responses/PathConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/render-config:
+    get:
+      tags: [ue-config-read]
+      summary: Get render_config
+      responses:
+        "200":
+          $ref: "#/components/responses/RenderConfigResponse"
+    put:
+      tags: [ue-config-read]
+      summary: Replace render_config document
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      description: Whole-document raw JSON replace in ue_config_documents.render_config.
+      requestBody:
+        $ref: "#/components/requestBodies/RawJSONObject"
+      responses:
+        "200":
+          $ref: "#/components/responses/RenderConfigResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/ndisplay/{name}:
+    get:
+      tags: [ue-config-read]
+      summary: Read a raw nDisplay configuration document
+      description: |
+        Reads ue_config_documents.config_key=ndisplay/{name}. An optional trailing .json is stripped.
+        Public demo templates are placeholders; configure local UE cluster details before actual use.
+        Read authentication follows security.protect_read.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: {type: string, example: cluster_1node_2viewport.ndisplay.template}
+      responses:
+        "200":
+          $ref: "#/components/responses/RawDocumentResponse"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "404":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/model-anchors:
+    get:
+      tags: [ue-config-aux]
+      summary: Read model-anchors
+      description: "Read access follows security.protect_read. Unknown record fields are preserved."
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxModelAnchorsConfig"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+    put:
+      tags: [ue-config-aux]
+      summary: Replace all model-anchors
+      description: "Atomically replace the complete collection, deleting omitted IDs. An explicit empty collection clears it; missing/null collections are rejected. Apply per-record revision validation; any conflict rolls back the entire request."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxModelAnchorsConfig"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxModelAnchorsConfig"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "409":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/model-anchors/{anchor_id}:
+    put:
+      tags: [ue-config-aux]
+      summary: Upsert one model-anchors record
+      description: "Revision-checked model anchor. Body anchor_id must match the path. New revisions may be absent/null/0/1 and save as 1. Existing records require the current revision; identical content is idempotent, changed content increments it. Stale revisions return 409."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      parameters:
+        - name: anchor_id
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 64}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxModelAnchor"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxModelAnchor"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "409":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/model-anchors/delete:
+    delete:
+      tags: [ue-config-aux]
+      summary: Delete model-anchors records
+      description: "Merge and deduplicate singular/plural ID fields. Missing IDs are ignored. At least one nonempty ID is required."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxDeleteAnchors"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxDeleteResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/sensor-devices:
+    get:
+      tags: [ue-config-aux]
+      summary: Read sensor-devices
+      description: "Read access follows security.protect_read. Unknown record fields are preserved."
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxSensorDevicesConfig"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+    put:
+      tags: [ue-config-aux]
+      summary: Replace all sensor-devices
+      description: "Atomically replace the complete collection, deleting omitted IDs. An explicit empty collection clears it; missing/null collections are rejected."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxSensorDevicesConfig"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxSensorDevicesConfig"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/sensor-devices/{device_id}:
+    put:
+      tags: [ue-config-aux]
+      summary: Upsert one sensor-devices record
+      description: "Last-write-wins sensor device. Body device_id must match the path. The complete record is replaced."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxSensorDevice"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxSensorDevice"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/sensor-devices/delete:
+    delete:
+      tags: [ue-config-aux]
+      summary: Delete sensor-devices records
+      description: "Merge and deduplicate singular/plural ID fields. Missing IDs are ignored. At least one nonempty ID is required."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxDeleteDevices"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxDeleteResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/cluster-agents-catalog:
+    get:
+      tags: [ue-config-aux]
+      summary: Read cluster-agents-catalog
+      description: "Read access follows security.protect_read. Unknown record fields are preserved."
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxCatalogConfig"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+    put:
+      tags: [ue-config-aux]
+      summary: Replace all cluster-agents-catalog
+      description: "Atomically replace the complete collection, deleting omitted IDs. An explicit empty collection clears it; missing/null collections are rejected. Each map key determines nodeId; all agent records must be objects."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxCatalogConfig"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxCatalogReplaceResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/cluster-agents-catalog/agents/{node_id}:
+    put:
+      tags: [ue-config-aux]
+      summary: Upsert one cluster-agents-catalog record
+      description: "Merged agent discovery snapshot. Submitted fields override existing fields; omitted fields are retained. Path determines nodeId."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      parameters:
+        - name: node_id
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxAgent"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxAgent"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/cluster-agents-catalog/agents/delete:
+    delete:
+      tags: [ue-config-aux]
+      summary: Delete cluster-agents-catalog records
+      description: "Merge and deduplicate singular/plural ID fields. Missing IDs are ignored. At least one nonempty ID is required."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxDeleteAgents"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxDeleteResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/cluster-agent-registry:
+    get:
+      tags: [ue-config-aux]
+      summary: Read cluster-agent-registry
+      description: "Read access follows security.protect_read. Unknown record fields are preserved."
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxRegistryConfig"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+    put:
+      tags: [ue-config-aux]
+      summary: Replace all cluster-agent-registry
+      description: "Atomically replace the complete collection, deleting omitted IDs. An explicit empty collection clears it; missing/null collections are rejected. Each map key determines nodeId; all agent records must be objects."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxRegistryConfig"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxRegistryConfig"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/cluster-agent-registry/agents/{node_id}:
+    put:
+      tags: [ue-config-aux]
+      summary: Upsert one cluster-agent-registry record
+      description: "Agent authorization entry. The complete entry is replaced. Path determines nodeId. Whitelist is derived from all rows with enabled=true; submitted whitelist values are ignored."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      parameters:
+        - name: node_id
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxAgent"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxRegistryUpsertResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+  /api/ue/config/cluster-agent-registry/agents/delete:
+    delete:
+      tags: [ue-config-aux]
+      summary: Delete cluster-agent-registry records
+      description: "Merge and deduplicate singular/plural ID fields. Missing IDs are ignored. At least one nonempty ID is required."
+      security:
+        - BearerAuth: []
+        - GatewayToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuxDeleteAgents"
+      responses:
+        "200":
+          description: JSON body directly; no code/data wrapper
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuxDeleteResponse"
+        "400":
+          $ref: "#/components/responses/JSONError"
+        "401":
+          $ref: "#/components/responses/JSONError"
+        "413":
+          $ref: "#/components/responses/JSONError"
+        "500":
+          $ref: "#/components/responses/JSONError"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-token
+    GatewayToken:
+      type: apiKey
+      in: header
+      name: X-Gateway-Token
+
+  parameters:
+    ScriptID:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+
+  requestBodies:
+    RawJSONObject:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+            example:
+              version: 1
+              name: raw_config_document
+
+  responses:
+    DataBundleResponse:
+      description: Wrapped DataBundle response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/DataBundleEnvelope"
+    PreloadResponse:
+      description: Wrapped preload response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PreloadEnvelope"
+    ConfigIndexResponse:
+      description: Config index body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConfigIndex"
+    RawDocumentResponse:
+      description: Raw config document
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RawDocumentExample"
+    InitConfigResponse:
+      description: init_config body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InitConfig"
+    ModelTypesResponse:
+      description: model-types body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ModelTypesConfig"
+    ModelTableResponse:
+      description: model-table body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ModelTable"
+    ModelConfigResponse:
+      description: model_config body. Shape depends on mode.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/StructuredModelConfig"
+              - $ref: "#/components/schemas/RuntimeModelConfig"
+              - $ref: "#/components/schemas/RawModelConfig"
+    StructuredModelConfigResponse:
+      description: structured model_config body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/StructuredModelConfig"
+    SceneDesiredResponse:
+      description: scene_desired body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SceneDesiredConfig"
+    ChartBindingResponse:
+      description: chart_binding body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ChartBinding"
+    VideoStreamsResponse:
+      description: video_streams body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/VideoStreams"
+    ChartConfigResponse:
+      description: chart_config body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ChartConfig"
+    ReportScriptsResponse:
+      description: report_scripts body
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/ReportScripts"
+              - $ref: "#/components/schemas/LightReportScripts"
+    DroneConfigResponse:
+      description: drone_config body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/DroneConfig"
+    PathConfigResponse:
+      description: path_config body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PathConfig"
+    RenderConfigResponse:
+      description: render_config body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RenderConfig"
+    JSONError:
+      description: error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: {type: string}
+    RequestTooLarge:
+      description: request body too large
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: {type: string, example: request body too large}
+
+  schemas:
+    AuxModelAnchor:
+      type: object
+      required: [anchor_id]
+      additionalProperties: true
+      properties:
+        anchor_id: {type: string, minLength: 1, maxLength: 64}
+        instance_id: {type: string, maxLength: 128}
+        revision:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+          nullable: true
+          description: Current revision on update; absent/null/0/1 on create. Saved revision starts at 1.
+        title: {type: string}
+        device_id: {type: string}
+        local_position: {type: object, additionalProperties: true}
+        local_normal: {type: object, additionalProperties: true}
+    AuxSensorDevice:
+      type: object
+      required: [device_id]
+      additionalProperties: true
+      properties:
+        device_id: {type: string, minLength: 1, maxLength: 128}
+        display_name: {type: string}
+        device_type: {type: string}
+        status: {type: string}
+        fault_message: {type: string}
+        updated_at: {type: integer, format: int64}
+    AuxAgent:
+      type: object
+      additionalProperties: true
+      properties:
+        nodeId:
+          type: string
+          description: Set from the path or the agents map key.
+        enabled: {type: boolean}
+    AuxModelAnchorsConfig:
+      type: object
+      required: [anchors]
+      properties:
+        version: {type: integer, enum: [1]}
+        anchors:
+          type: array
+          items: {$ref: "#/components/schemas/AuxModelAnchor"}
+    AuxSensorDevicesConfig:
+      type: object
+      required: [devices]
+      properties:
+        version: {type: integer, enum: [1]}
+        devices:
+          type: array
+          items: {$ref: "#/components/schemas/AuxSensorDevice"}
+    AuxCatalogConfig:
+      type: object
+      required: [agents]
+      properties:
+        version: {type: integer, enum: [1]}
+        updatedAt:
+          type: number
+          format: double
+          readOnly: true
+          description: Latest database updated_at in Unix seconds; 0 for an empty catalog.
+        agents:
+          type: object
+          additionalProperties: {$ref: "#/components/schemas/AuxAgent"}
+    AuxCatalogReplaceResponse:
+      type: object
+      properties:
+        version: {type: integer, enum: [1]}
+        agents:
+          type: object
+          additionalProperties: {$ref: "#/components/schemas/AuxAgent"}
+    AuxRegistryConfig:
+      type: object
+      required: [agents]
+      properties:
+        version: {type: integer, enum: [1]}
+        agents:
+          type: object
+          additionalProperties: {$ref: "#/components/schemas/AuxAgent"}
+        authorizedWhitelist:
+          type: array
+          readOnly: true
+          items: {type: string}
+          description: Sorted IDs derived from enabled=true entries; never trusted from input.
+    AuxRegistryUpsertResponse:
+      type: object
+      properties:
+        agents:
+          type: object
+          additionalProperties: {$ref: "#/components/schemas/AuxAgent"}
+        authorizedWhitelist:
+          type: array
+          items: {type: string}
+    AuxDeleteAnchors:
+      type: object
+      anyOf:
+        - required: [anchor_id]
+        - required: [anchor_ids]
+      properties:
+        anchor_id: {type: string, minLength: 1, maxLength: 64}
+        anchor_ids:
+          type: array
+          items: {type: string, minLength: 1, maxLength: 64}
+    AuxDeleteDevices:
+      type: object
+      anyOf:
+        - required: [device_id]
+        - required: [device_ids]
+      properties:
+        device_id: {type: string, minLength: 1, maxLength: 128}
+        device_ids:
+          type: array
+          items: {type: string, minLength: 1, maxLength: 128}
+    AuxDeleteAgents:
+      type: object
+      anyOf:
+        - required: [node_id]
+        - required: [node_ids]
+      properties:
+        node_id: {type: string, minLength: 1, maxLength: 128}
+        node_ids:
+          type: array
+          items: {type: string, minLength: 1, maxLength: 128}
+    AuxDeleteResponse:
+      type: object
+      properties:
+        ok: {type: boolean, example: true}
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string, example: operator}
+        password: {type: string, example: <your-password>}
+    AuthUser:
+      type: object
+      properties:
+        username: {type: string, example: operator}
+        role: {type: string, example: operator}
+    LoginResponse:
+      type: object
+      properties:
+        access_token: {type: string, example: "<token>"}
+        token_type: {type: string, example: Bearer}
+        expires_in: {type: integer, example: 7200}
+        user:
+          $ref: "#/components/schemas/AuthUser"
+    LogoutResponse:
+      type: object
+      properties:
+        ok: {type: boolean, example: true}
+    HealthDependencyCheck:
+      type: object
+      properties:
+        status: {type: string, example: ok}
+        configured: {type: boolean, example: true}
+    WSDataStatus:
+      type: object
+      properties:
+        enabled: {type: boolean, example: true}
+        connected: {type: boolean, example: true}
+        ws_data_url: {type: string, example: "ws://127.0.0.1:8000/ws_data"}
+        last_connect_time: {type: string, example: "2026-06-11T10:00:00Z"}
+        last_disconnect_time: {type: string, example: "2026-06-11T10:05:00Z"}
+        last_pong_time: {type: string, example: "2026-06-11T10:04:50Z"}
+        last_push_time: {type: string, example: "2026-06-11T10:04:55Z"}
+        last_success_time: {type: string, example: "2026-06-11T10:04:55Z"}
+        last_error_time: {type: string, example: "2026-06-11T10:05:00Z"}
+        last_error: {type: string, example: "websocket: close 1006"}
+        success_count: {type: integer, format: int64, example: 12}
+        failed_count: {type: integer, format: int64, example: 1}
+        reconnect_count: {type: integer, format: int64, example: 2}
+        message_count_by_type:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          example:
+            chart_data_push: 10
+            video_streams_set: 2
+    DataBundleEnvelope:
+      type: object
+      properties:
+        code: {type: string, example: OK}
+        data:
+          $ref: "#/components/schemas/DataBundle"
+    PreloadEnvelope:
+      type: object
+      properties:
+        code: {type: string, example: OK}
+        data:
+          $ref: "#/components/schemas/PreloadResult"
+    PreloadResult:
+      type: object
+      properties:
+        task_id: {type: string, example: bundle-security_main-20260610T120000Z}
+        script_id: {type: string, example: security_main}
+        status: {type: string, example: done}
+    DataBundle:
+      type: object
+      properties:
+        bundle_id: {type: string, example: bundle-security_main-20260610T120000Z}
+        script_id: {type: string, example: security_main}
+        scene_id: {type: string, example: campus_security}
+        data_script_id:
+          type: string
+          example: security_main
+          description: Alias for script_id that explicitly means Gateway DataBundle script id.
+        data_scene_id:
+          type: string
+          example: campus_security
+          description: Alias for scene_id that explicitly means Gateway DataBundle scene id.
+        version: {type: string, example: v1}
+        generated_at: {type: string, example: "2026-06-10T12:00:00Z"}
+        ttl_seconds: {type: integer, example: 60}
+        modules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModuleData"
+        charts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChartData"
+        videos:
+          type: array
+          items:
+            $ref: "#/components/schemas/VideoSource"
+        model_bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelBinding"
+    ModuleData:
+      type: object
+      properties:
+        module_id: {type: string, example: today_access_card}
+        type: {type: string, example: stat_card}
+        title: {type: string, example: 今日通行}
+        data_key: {type: string, example: security.access.today}
+        target_kind: {type: string, example: chart}
+        target_id: {type: string, example: chart_h}
+        value: {example: 3280}
+        unit: {type: string, example: 人次}
+        payload: {example: {in_count: 1800, out_count: 1480, total_count: 3280}}
+        timestamp: {type: string, example: "2026-06-10T12:00:00Z"}
+    ChartData:
+      type: object
+      properties:
+        module_id: {type: string, example: today_access_card}
+        data_key: {type: string, example: security.access.today}
+        binding_id: {type: string, example: security.access.today}
+        chart_id: {type: string, example: chart_h}
+        template: {type: string, example: stat_card_basic}
+        title: {type: string, example: 今日通行}
+        x_axis:
+          type: array
+          items: {type: string}
+          example: ["入校", "出校"]
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChartSeries"
+        rows:
+          type: array
+          items:
+            type: array
+            items: {type: string}
+          example: [["指标", "数值", "单位"], ["今日通行", "3280", "人次"]]
+    ChartSeries:
+      type: object
+      properties:
+        name: {type: string, example: 通行人数}
+        unit: {type: string, example: 人次}
+        data:
+          type: array
+          items: {type: number}
+          example: [1800, 1480]
+    VideoSource:
+      type: object
+      properties:
+        video_id: {type: string, example: vs_cam_65}
+        title: {type: string, example: 校门摄像头}
+        play_url: {type: string, example: "webrtc://example/cam65"}
+        status: {type: string, example: online}
+        bind_model_id: {type: string, example: gate_camera_model}
+    ModelBinding:
+      type: object
+      properties:
+        bind_model_id: {type: string, example: gate_camera_model}
+        object_type: {type: string, example: video}
+        object_id: {type: string, example: vs_cam_65}
+        data_keys:
+          type: array
+          items: {type: string}
+          example: [security.video.gate]
+    ConfigIndex:
+      type: object
+      properties:
+        configs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConfigMeta"
+    ConfigMeta:
+      type: object
+      properties:
+        config_key: {type: string, example: chart_config}
+        file_name: {type: string, example: chart_config.json}
+        version: {type: string, example: v1}
+        enabled: {type: boolean, example: true}
+        source: {type: string, example: ue_config}
+    RawDocumentExample:
+      type: object
+      example:
+        version: 1
+        name: raw_config_document
+    InitConfig:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        camera:
+          $ref: "#/components/schemas/Camera"
+        auto_load_on_startup: {type: boolean, example: true}
+        instance_ids:
+          type: array
+          items: {type: string}
+          example: [demo_model_1]
+    BoundsSize:
+      type: object
+      properties:
+        x: {type: number, example: 1420.998}
+        y: {type: number, example: 983.022}
+        z: {type: number, example: 430.093}
+    ModelTypesConfig:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        model_types:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelType"
+    ModelType:
+      type: object
+      properties:
+        model_id: {type: string, example: demo_model}
+        uri: {type: string, example: "file://./models/demo/demo.udatasmith"}
+        format: {type: string, example: udatasmith}
+        source_path: {type: string, example: "./models/demo/demo.udatasmith"}
+        base_bounds_size:
+          $ref: "#/components/schemas/BoundsSize"
+        bounds_negative_extent_axis:
+          type: integer
+          nullable: true
+          example: null
+        enabled: {type: boolean, example: true}
+    Vector3:
+      type: object
+      properties:
+        x: {type: number}
+        y: {type: number}
+        z: {type: number}
+    Rotation:
+      type: object
+      properties:
+        yaw: {type: number}
+        pitch: {type: number}
+        roll: {type: number}
+    Transform:
+      type: object
+      properties:
+        position:
+          $ref: "#/components/schemas/Vector3"
+        rotation:
+          $ref: "#/components/schemas/Rotation"
+        scale:
+          $ref: "#/components/schemas/Vector3"
+    Camera:
+      type: object
+      required: [camera_id, position, rotation]
+      properties:
+        camera_id: {type: string}
+        position:
+          $ref: "#/components/schemas/Vector3"
+        rotation:
+          $ref: "#/components/schemas/Rotation"
+    ChartConfig:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        overlay_hud_max_panel_width: {type: integer, example: 640}
+        charts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChartPanel"
+    ChartPanel:
+      type: object
+      properties:
+        chart_id: {type: string, example: chart_h}
+        chart_name: {type: string, example: 今日通行}
+        visible: {type: boolean, example: true}
+        panel_key: {type: string, example: overlay_hud}
+        rows: {type: integer, example: 2}
+        cols: {type: integer, example: 3}
+        cell_values:
+          type: array
+          items:
+            type: array
+            items: {type: string}
+          example: [["指标", "数值"], ["今日通行", "3280"]]
+    ChartBinding:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChartBindingItem"
+    ChartBindingItem:
+      type: object
+      properties:
+        binding_id: {type: string, example: security.access.today}
+        chart_id: {type: string, example: chart_h}
+    VideoStreams:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        streams:
+          type: array
+          items:
+            $ref: "#/components/schemas/VideoStream"
+    VideoStream:
+      type: object
+      properties:
+        stream_id: {type: string, example: vs_cam_65}
+        name: {type: string, example: 校门摄像头}
+        webrtc_player_url: {type: string, example: "http://127.0.0.1:8000/webrtc/vs_cam_65"}
+    PathConfig:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        nav_playback:
+          $ref: "#/components/schemas/NavPlayback"
+        plans_by_id:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/PathPlan"
+          example:
+            campus_intro:
+              path_id: campus_intro
+              name: 校园漫游
+              waypoints:
+                - {x: 0, y: 0, z: 0}
+                - {x: 1000, y: 0, z: 300}
+    NavPlayback:
+      type: object
+      properties:
+        use_duration: {type: boolean, example: true}
+        planned_duration_s: {type: number, example: 30}
+        planned_speed_cm_s: {type: number, example: 500}
+    PathPlan:
+      type: object
+      properties:
+        path_id: {type: string, example: campus_intro}
+        name: {type: string, example: 校园漫游}
+        waypoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/Vector3"
+    DroneConfig:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        drones:
+          type: array
+          items:
+            type: object
+            properties:
+              drone_id: {type: string, example: drone_1}
+              name: {type: string, example: 巡检无人机}
+              enabled: {type: boolean, example: true}
+    RenderConfig:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        enabled: {type: boolean, example: true}
+        settings:
+          $ref: "#/components/schemas/RenderSettings"
+    RenderSettings:
+      type: object
+      properties:
+        shadows: {type: boolean, example: true}
+        ao: {type: boolean, example: true}
+        bloom: {type: boolean, example: true}
+        eye_adaptation: {type: boolean, example: false}
+        extend_luminance_range: {type: boolean, example: true}
+        local_exposure_highlight: {type: number, example: 1}
+        local_exposure_shadow: {type: number, example: 1}
+        exposure_bias: {type: number, example: 0}
+        tonemapper_gamma: {type: number, example: 2.2}
+        contrast: {type: number, example: 1}
+        saturation: {type: number, example: 1}
+        sharpen: {type: number, example: 0}
+        vignette: {type: number, example: 0}
+    StructuredModelConfig:
+      type: object
+      example:
+        version: 1
+        placements:
+          demo_model_1:
+            visible: true
+            transform:
+              position: {x: 1, y: 2, z: 3}
+              rotation: {yaw: 0, pitch: 0, roll: 0}
+              scale: {x: 1, y: 1, z: 1}
+      properties:
+        version: {type: integer}
+        placements:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ModelPlacementState"
+    ModelPlacementState:
+      type: object
+      properties:
+        visible: {type: boolean, example: true}
+        transform:
+          $ref: "#/components/schemas/Transform"
+    RuntimeModelConfig:
+      type: object
+      example:
+        version: 1
+        last_load_by_instance_id:
+          demo_model_1:
+            model_id: demo_model
+            visible: true
+            transform:
+              position: {x: 1, y: 2, z: 3}
+              rotation: {yaw: 0, pitch: 0, roll: 0}
+              scale: {x: 1, y: 1, z: 1}
+            bounds_size: {x: 100, y: 100, z: 100}
+      properties:
+        version: {type: integer}
+        last_load_by_instance_id:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/ModelInstanceState"
+    RawModelConfig:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        last_load_by_instance_id:
+          type: object
+          example:
+            demo_model_1:
+              model_id: demo_model
+              visible: true
+    ModelInstanceState:
+      type: object
+      properties:
+        model_id: {type: string, example: demo_model}
+        visible: {type: boolean, example: true}
+        transform:
+          $ref: "#/components/schemas/Transform"
+        bounds_size:
+          $ref: "#/components/schemas/BoundsSize"
+    SceneDesiredConfig:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        scene_models_desired:
+          type: array
+          items:
+            $ref: "#/components/schemas/SceneModelDesired"
+    SceneModelDesired:
+      type: object
+      properties:
+        instance_id: {type: string, example: demo_model_1}
+        model_id: {type: string, example: demo_model}
+        uri: {type: string, example: "file://./models/demo/demo.udatasmith"}
+        format: {type: string, example: udatasmith}
+        source_path: {type: string, example: "./models/demo/demo.udatasmith"}
+        display_name: {type: string, example: 演示模型}
+        bounds_size:
+          $ref: "#/components/schemas/BoundsSize"
+        visible: {type: boolean, example: true}
+        transform:
+          $ref: "#/components/schemas/Transform"
+    ReportScripts:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        scripts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportScript"
+    ReportScript:
+      type: object
+      properties:
+        script_id: {type: string, example: campus_report}
+        label: {type: string, example: 校园汇报}
+        chapters:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportChapter"
+    ReportChapter:
+      type: object
+      properties:
+        chapter_id: {type: string, example: overview}
+        label: {type: string, example: 总览}
+        scenes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportScene"
+    ReportScene:
+      type: object
+      properties:
+        scene_id: {type: string, example: campus_gate}
+        label: {type: string, example: 校门场景}
+        camera:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/Camera"
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportBinding"
+        warmup:
+          $ref: "#/components/schemas/ReportWarmup"
+    LightReportScripts:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        scripts:
+          type: array
+          items:
+            $ref: "#/components/schemas/LightReportScript"
+    LightReportScript:
+      type: object
+      properties:
+        script_id: {type: string, example: security_main}
+        label: {type: string, example: 安防汇报脚本}
+        chapters:
+          type: array
+          items:
+            $ref: "#/components/schemas/LightReportChapter"
+    LightReportChapter:
+      type: object
+      properties:
+        chapter_id: {type: string, example: default}
+        label: {type: string, example: 默认章节}
+        scenes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LightReportScene"
+    LightReportScene:
+      type: object
+      properties:
+        scene_id: {type: string, example: campus_security}
+        label: {type: string, example: 安防场景}
+        warmup:
+          $ref: "#/components/schemas/ReportWarmup"
+    ReportScriptRequest:
+      type: object
+      required: [script_id]
+      properties:
+        script_id: {type: string}
+        new_script_id: {type: string}
+        label: {type: string}
+    ReportChapterRequest:
+      type: object
+      required: [script_id, chapter_id]
+      properties:
+        script_id: {type: string}
+        chapter_id: {type: string}
+        new_chapter_id: {type: string}
+        label: {type: string}
+    ReportSceneRequest:
+      type: object
+      required: [script_id, chapter_id, scene_id]
+      properties:
+        script_id: {type: string}
+        chapter_id: {type: string}
+        scene_id: {type: string}
+        new_scene_id: {type: string}
+        label: {type: string}
+        camera:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/Camera"
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportBinding"
+        warmup:
+          $ref: "#/components/schemas/ReportWarmup"
+    ReportSceneCameraRequest:
+      type: object
+      required: [script_id, chapter_id, scene_id, camera]
+      properties:
+        script_id: {type: string}
+        chapter_id: {type: string}
+        scene_id: {type: string}
+        camera:
+          $ref: "#/components/schemas/Camera"
+    ReportBinding:
+      type: object
+      required: [instance_id, model_id]
+      properties:
+        instance_id: {type: string}
+        model_id: {type: string}
+        visible:
+          type: boolean
+          default: true
+        transform:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/Transform"
+    ReportBindingsRequest:
+      type: object
+      required: [script_id, chapter_id, scene_id, bindings]
+      properties:
+        script_id: {type: string}
+        chapter_id: {type: string}
+        scene_id: {type: string}
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportBinding"
+    ReportBindingsDeleteRequest:
+      type: object
+      required: [script_id, chapter_id, scene_id]
+      properties:
+        script_id: {type: string}
+        chapter_id: {type: string}
+        scene_id: {type: string}
+        instance_id: {type: string}
+        instance_ids:
+          type: array
+          items: {type: string}
+    ReportSceneWarmupRequest:
+      type: object
+      required: [script_id, chapter_id, scene_id, warmup]
+      properties:
+        script_id: {type: string}
+        chapter_id: {type: string}
+        scene_id: {type: string}
+        warmup:
+          $ref: "#/components/schemas/ReportWarmup"
+    ReportWarmup:
+      type: object
+      description: warmup.data contains data_script_id values from scripts.script_id; warmup.charts contains chart binding_id values from data_bindings.binding_id; warmup.videos contains video_id values from video_sources.video_id.
+      properties:
+        data:
+          type: array
+          items: {type: string}
+        videos:
+          type: array
+          items: {type: string}
+        charts:
+          type: array
+          items: {type: string}
+    WarmupOptions:
+      type: object
+      required: [version, data_scripts, charts, videos, instances]
+      properties:
+        version: {type: integer, example: 1}
+        data_scripts:
+          type: array
+          items:
+            $ref: "#/components/schemas/WarmupDataScriptOption"
+        charts:
+          type: array
+          items:
+            $ref: "#/components/schemas/WarmupChartOption"
+        videos:
+          type: array
+          items:
+            $ref: "#/components/schemas/WarmupVideoOption"
+        instances:
+          type: array
+          items:
+            $ref: "#/components/schemas/WarmupInstanceOption"
+    WarmupDataScriptOption:
+      type: object
+      properties:
+        data_script_id: {type: string, example: security_main}
+        label: {type: string, example: 安防汇报脚本}
+        data_scene_id: {type: string, example: campus_security}
+        data_keys:
+          type: array
+          items: {type: string}
+          example: [security.access.today, security.fire.status]
+    WarmupChartOption:
+      type: object
+      properties:
+        binding_id:
+          type: string
+          example: sim_3
+          description: chart_data_push payload binding_id; this is the value used by warmup.charts.
+        chart_id: {type: string, example: chart_h}
+        title: {type: string, example: 今日出入人数}
+        data_key: {type: string, example: security.access.today}
+        data_script_id: {type: string, example: security_main}
+        module_id: {type: string, example: today_access_card}
+    WarmupVideoOption:
+      type: object
+      properties:
+        video_id: {type: string, example: vs_cam_65}
+        title: {type: string, example: 校门口监控}
+        play_url: {type: string, example: "http://example.test/cam_65"}
+        data_script_id: {type: string, example: security_main}
+        module_id: {type: string, example: gate_video_panel}
+    WarmupInstanceOption:
+      type: object
+      properties:
+        instance_id: {type: string, example: demo_model_1}
+        model_id: {type: string, example: demo_model}
+        display_name: {type: string, example: 演示模型}
+        enabled: {type: boolean, example: true}
+    ReportScenePreloadRequest:
+      type: object
+      required: [script_id, chapter_id, scene_id]
+      properties:
+        script_id:
+          type: string
+          example: security_main
+          description: report_scripts script_id, not data_script_id.
+        chapter_id: {type: string, example: demo_chapter}
+        scene_id:
+          type: string
+          example: demo_scene
+          description: report_scripts scene_id, not DataBundle data_scene_id.
+        force:
+          type: boolean
+          default: true
+        push_ws:
+          type: boolean
+          default: true
+    ReportScenePreloadResponse:
+      type: object
+      properties:
+        version: {type: integer, example: 1}
+        script_id: {type: string, example: security_main}
+        chapter_id: {type: string, example: demo_chapter}
+        scene_id: {type: string, example: demo_scene}
+        warmup:
+          $ref: "#/components/schemas/ReportWarmup"
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReportScenePreloadResult"
+    ReportScenePreloadResult:
+      type: object
+      properties:
+        data_script_id: {type: string, example: security_main}
+        force: {type: boolean, example: true}
+        push_ws: {type: boolean, example: true}
+        success: {type: boolean, example: true}
+        bundle_id: {type: string, example: bundle_123}
+        error: {type: string, example: ""}
+        charts_requested:
+          type: array
+          items: {type: string}
+          example: [sim_3]
+        videos_requested:
+          type: array
+          items: {type: string}
+          example: [vs_cam_65]
+    BootstrapConfig:
+      type: object
+      required: [version, init_config, path_config, chart_config, chart_binding, drone_config, model_table, model_config, scene_desired]
+      properties:
+        version: {type: integer}
+        init_config:
+          $ref: "#/components/schemas/InitConfig"
+        path_config:
+          $ref: "#/components/schemas/PathConfig"
+        chart_config:
+          $ref: "#/components/schemas/ChartConfig"
+        chart_binding:
+          $ref: "#/components/schemas/ChartBinding"
+        drone_config:
+          $ref: "#/components/schemas/DroneConfig"
+        model_table:
+          $ref: "#/components/schemas/ModelTable"
+        model_config:
+          $ref: "#/components/schemas/RuntimeModelConfig"
+        scene_desired:
+          $ref: "#/components/schemas/SceneDesiredConfig"
+    UpdateInitConfigRequest:
+      type: object
+      properties:
+        camera_id: {type: string}
+        position:
+          $ref: "#/components/schemas/Vector3"
+        rotation:
+          $ref: "#/components/schemas/Rotation"
+        auto_load_on_startup: {type: boolean}
+    InstanceIDsRequest:
+      type: object
+      properties:
+        instance_id: {type: string}
+        instance_ids:
+          type: array
+          items: {type: string}
+    ModelTypeIDsRequest:
+      type: object
+      properties:
+        model_id: {type: string}
+        model_ids:
+          type: array
+          items: {type: string}
+    ModelTypesRequest:
+      oneOf:
+        - type: object
+          properties:
+            model_id: {type: string, example: demo_model}
+            uri: {type: string, example: "file://./models/demo/demo.udatasmith"}
+            format: {type: string, example: udatasmith}
+            source_path: {type: string, example: "./models/demo/demo.udatasmith"}
+            base_bounds_size:
+              $ref: "#/components/schemas/BoundsSize"
+            bounds_negative_extent_axis:
+              type: integer
+              nullable: true
+              example: null
+            enabled: {type: boolean, example: true}
+        - type: object
+          properties:
+            model_types:
+              type: array
+              items:
+                $ref: "#/components/schemas/ModelType"
+    ModelTable:
+      type: object
+      properties:
+        version: {type: integer}
+        entries:
+          type: array
+          items:
+            type: object
+            properties:
+              instance_id: {type: string}
+              model_id: {type: string}
+              display_name: {type: string}
+    ModelTableEntriesRequest:
+      oneOf:
+        - type: object
+          properties:
+            instance_id: {type: string}
+            model_id: {type: string}
+            display_name: {type: string}
+            sort_order: {type: integer}
+            enabled: {type: boolean}
+        - type: object
+          properties:
+            entries:
+              type: array
+              items:
+                type: object
+                properties:
+                  instance_id: {type: string, example: demo_model_1}
+                  model_id: {type: string, example: demo_model}
+                  display_name: {type: string, example: 演示模型}
+                  sort_order: {type: integer, example: 10}
+                  enabled: {type: boolean, example: true}
+    ModelPlacementRequest:
+      type: object
+      description: transform is canonical. Top-level position/rotation/scale are deprecated compatibility fields and must not be mixed with transform.
+      properties:
+        visible: {type: boolean}
+        transform:
+          $ref: "#/components/schemas/Transform"
+        position:
+          allOf:
+            - $ref: "#/components/schemas/Vector3"
+          deprecated: true
+        rotation:
+          allOf:
+            - $ref: "#/components/schemas/Rotation"
+          deprecated: true
+        scale:
+          allOf:
+            - $ref: "#/components/schemas/Vector3"
+          deprecated: true
+    ModelPlacementsRequest:
+      oneOf:
+        - allOf:
+            - $ref: "#/components/schemas/ModelPlacementRequest"
+            - type: object
+              properties:
+                instance_id: {type: string}
+        - type: object
+          properties:
+            placements:
+              type: array
+              items:
+                allOf:
+                  - $ref: "#/components/schemas/ModelPlacementRequest"
+                  - type: object
+                    properties:
+                      instance_id: {type: string}

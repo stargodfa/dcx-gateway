@@ -1,0 +1,18 @@
+[Unit]
+Description=dcx-gateway OpenAPI Docs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dcx-gateway
+WorkingDirectory=/opt/dcx-gateway-docs
+Environment=DOCS_PORT=8090
+ExecStart=/bin/bash /opt/dcx-gateway-docs/scripts/serve_openapi_docs.sh
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

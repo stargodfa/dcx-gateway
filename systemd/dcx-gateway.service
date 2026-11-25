@@ -1,0 +1,17 @@
+[Unit]
+Description=dcx-gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dcx-gateway
+WorkingDirectory=/opt/dcx-gateway/dcx-gateway-arm64
+ExecStart=/opt/dcx-gateway/dcx-gateway-arm64/dcx-gateway
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
